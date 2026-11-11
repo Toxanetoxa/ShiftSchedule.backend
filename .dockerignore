@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+!.env.example
+vendor
+storage/logs/*
+storage/framework/cache/*
+storage/framework/sessions/*
+storage/framework/views/*
+.idea
+.vscode
+.DS_Store
