@@ -562,8 +562,8 @@ mv /var/lib/shiftschedule/current-image.next /var/lib/shiftschedule/current-imag
 3. В `CORS_ALLOWED_ORIGINS` перечислите origin клиентского приложения. Для текущего GitHub Pages это `https://toxanetoxa.github.io`, без пути репозитория. Домен API не является origin клиентского приложения.
 4. Пересоздайте `app` командой обслуживания выше. Caddy использует новый `SERVER_NAME` для HTTPS; не удаляйте его постоянный том.
 5. Обновите backend-переменную GitHub Actions `DEPLOY_URL`, чтобы CI проверял новый адрес. `DEPLOY_HOST` можно оставить IP, если SSH по нему сохраняется.
-6. В репозитории клиентского приложения задайте variable `VITE_API_BASE_URL=https://api.example.com/api/v1` и повторно запустите его workflow публикации: адрес API встраивается в клиентскую сборку.
+6. В репозитории клиентского приложения задайте variable `VITE_API_BASE_URL=https://api.example.com/api` и повторно запустите его workflow публикации: адрес API встраивается в клиентскую сборку. Версия `v1` указывается в путях конкретных запросов клиента.
 
-Для текущего домена клиенту нужен `VITE_API_BASE_URL=https://test.api.shift-schedule.videoscale.pro/api/v1`. Серверные `SERVER_NAME` и `APP_URL`, а также переменная CI `DEPLOY_URL` должны указывать на этот же домен; SSH-переменная `DEPLOY_HOST` остаётся `148.253.210.13`.
+Для текущего домена клиенту нужен `VITE_API_BASE_URL=https://test.api.shift-schedule.videoscale.pro/api`. Серверные `SERVER_NAME` и `APP_URL`, а также переменная CI `DEPLOY_URL` должны указывать на этот же домен; SSH-переменная `DEPLOY_HOST` остаётся `148.253.210.13`.
 
 Production-конфигурация оставляет демонстрационный режим: посетители могут читать и менять один общий график без входа. Для реальных пользователей необходимо добавить аутентификацию и проверку прав; выключение demo mode само по себе закрывает маршруты графика. `app:initialize` продолжает выполнять исходные сиды, включая тестовую запись пользователя.
