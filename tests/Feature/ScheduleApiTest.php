@@ -289,6 +289,28 @@ class ScheduleApiTest extends TestCase
         $this->assertDatabaseCount('shifts', 0);
     }
 
+    #[DataProvider('invalidWorkDates')]
+    public function test_invalid_work_dates_reject_assignments_and_clears_atomically(string $workDate, bool $clear): void
+    {
+        $this->assertError($this->patchCells(1, [
+            $this->change(self::FIRST_EMPLOYEE, '2026-11-09', $this->morning()),
+            $this->change(self::SECOND_EMPLOYEE, $workDate, $clear ? null : $this->morning()),
+        ]), 422, 'VALIDATION_FAILED')->assertJsonPath('error.details.field', 'changes.1.workDate');
+
+        $this->assertDatabaseCount('shifts', 0);
+        $this->assertSame(1, Schedule::findOrFail(self::SCHEDULE)->version);
+    }
+
+    public static function invalidWorkDates(): array
+    {
+        return [
+            'assign with year zero' => ['0000-01-01', false],
+            'clear with year zero' => ['0000-01-01', true],
+            'assign on nonexistent date' => ['2026-02-30', false],
+            'clear on nonexistent date' => ['2026-02-30', true],
+        ];
+    }
+
     #[DataProvider('invalidRanges')]
     public function test_invalid_ranges_are_rejected_by_calendar_and_publication(string $from, string $to): void
     {

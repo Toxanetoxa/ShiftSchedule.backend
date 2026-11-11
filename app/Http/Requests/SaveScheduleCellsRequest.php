@@ -17,7 +17,7 @@ class SaveScheduleCellsRequest extends ScheduleApiRequest
             'changes' => ['present', 'array', 'list', 'max:2000'],
             'changes.*' => ['required', 'array:employeeId,workDate,shift', 'required_array_keys:employeeId,workDate,shift'],
             'changes.*.employeeId' => ['required', 'string', 'uuid'],
-            'changes.*.workDate' => ['required', 'string', 'date_format:Y-m-d'],
+            'changes.*.workDate' => ['bail', 'required', 'string', 'date_format:Y-m-d', 'date'],
             'changes.*.shift' => ['present', 'nullable', 'array:startTime,endTime,endDayOffset,sourceTemplateId', 'required_array_keys:startTime,endTime,endDayOffset,sourceTemplateId'],
             'changes.*.shift.startTime' => ['required_with:changes.*.shift', 'string', 'regex:/\A(?:[01]\d|2[0-3]):[0-5]\d\z/'],
             'changes.*.shift.endTime' => ['required_with:changes.*.shift', 'string', 'regex:/\A(?:[01]\d|2[0-3]):[0-5]\d\z/'],
