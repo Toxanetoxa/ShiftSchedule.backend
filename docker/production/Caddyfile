@@ -1,0 +1,58 @@
+{
+	admin off
+	frankenphp
+	servers {
+		timeouts {
+			read_header 10s
+			read_body 15s
+			write 30s
+			idle 1m
+		}
+		max_header_size 32KB
+	}
+}
+
+{$SERVER_NAME} {
+	# Public IP certificates require Let's Encrypt's short-lived profile.
+	tls {
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+			profile shortlived
+		}
+	}
+
+	root * /app/public
+	encode zstd gzip
+	request_body {
+		max_size 1MB
+	}
+	@private path /.env* /.git/* /vendor/*
+	respond @private 404
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+	php_server {
+		try_files {path} index.php
+	}
+	log {
+		output stdout
+		format json
+	}
+}
+
+# This listener is reachable only from inside the application container.
+:8080 {
+	bind 127.0.0.1
+	@health path /up
+	handle @health {
+		root * /app/public
+		php_server {
+			try_files index.php
+		}
+	}
+	handle {
+		respond 404
+	}
+}

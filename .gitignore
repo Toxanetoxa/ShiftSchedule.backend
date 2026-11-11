@@ -9,6 +9,7 @@ _ide_helper.php
 .env
 .env.*
 !.env.example
+!.env.production.example
 /auth.json
 Homestead.json
 Homestead.yaml
