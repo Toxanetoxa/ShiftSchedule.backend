@@ -1,0 +1,42 @@
+# Dependencies and generated files
+/vendor/
+/coverage/
+/.phpunit.cache/
+.phpunit.result.cache
+_ide_helper.php
+
+# Local configuration; keep the shared template
+.env
+.env.*
+!.env.example
+/auth.json
+Homestead.json
+Homestead.yaml
+
+# Runtime files (nested .gitignore files preserve storage/cache directories)
+*.log
+/public/storage
+/storage/*.key
+/storage/pail/
+
+# Editors, operating system files and local AI tooling
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.phpactor.json
+/.agents/
+/.claude/
+/.codex/
+/.cursor/
+/.idea/
+/.nova/
+/.vscode/
+/.zed/
+/AGENTS.md
+/CLAUDE.md
+/boost.json
+
+# Local design specification
+/schedule-api-postgresql.md
