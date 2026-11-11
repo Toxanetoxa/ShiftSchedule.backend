@@ -1,0 +1,164 @@
+name: Test, build and deploy API
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: shiftschedule_testing
+          POSTGRES_USER: shiftschedule
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shiftschedule -d shiftschedule_testing"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build test image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/production/Dockerfile
+          target: test
+          platforms: linux/amd64
+          load: true
+          tags: shiftschedule-test:ci
+          cache-from: type=gha,scope=backend-test
+          cache-to: type=gha,mode=max,scope=backend-test
+
+      - name: Validate Composer files
+        run: docker run --rm shiftschedule-test:ci composer validate --strict
+
+      - name: Run tests against PostgreSQL
+        run: |
+          docker run --rm --network host \
+            -e APP_ENV=testing \
+            -e DB_CONNECTION=pgsql \
+            -e DB_HOST=127.0.0.1 \
+            -e DB_PORT=5432 \
+            -e DB_DATABASE=shiftschedule_testing \
+            -e DB_USERNAME=shiftschedule \
+            -e DB_PASSWORD=ci-only-password \
+            -e CACHE_STORE=array \
+            shiftschedule-test:ci php artisan test --compact
+
+      - name: Build production image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/production/Dockerfile
+          target: production
+          platforms: linux/amd64
+          load: true
+          tags: shiftschedule-api:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=backend-production
+          cache-to: type=gha,mode=max,scope=backend-production
+
+      - name: Package production image
+        if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+        run: docker save "shiftschedule-api:${GITHUB_SHA}" | gzip -1 > "$RUNNER_TEMP/api-image.tar.gz"
+
+      - name: Upload deployment image
+        if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: api-image-${{ github.sha }}
+          path: ${{ runner.temp }}/api-image.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  deploy:
+    if: github.ref == 'refs/heads/master' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: production
+      url: ${{ vars.DEPLOY_URL || 'https://148.253.210.13' }}
+    env:
+      DEPLOY_HOST: ${{ vars.DEPLOY_HOST || '148.253.210.13' }}
+      DEPLOY_USER: ${{ vars.DEPLOY_USER || 'shiftschedule-deploy' }}
+      DEPLOY_URL: ${{ vars.DEPLOY_URL || 'https://148.253.210.13' }}
+    steps:
+      - name: Download tested image
+        uses: actions/download-artifact@v8
+        with:
+          name: api-image-${{ github.sha }}
+          path: ${{ runner.temp }}/deployment
+
+      - name: Deploy through restricted SSH command
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${DEPLOY_SSH_KEY:?Set the DEPLOY_SSH_KEY repository secret}"
+          : "${DEPLOY_KNOWN_HOSTS:?Set the DEPLOY_KNOWN_HOSTS repository secret}"
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$DEPLOY_USER" =~ ^[a-z_][a-z0-9_-]*$ ]]
+          [[ "$DEPLOY_HOST" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*$ ]]
+
+          umask 077
+          ssh_dir=$(mktemp -d "$RUNNER_TEMP/deploy-ssh.XXXXXX")
+          trap 'rm -rf "$ssh_dir"' EXIT
+          printf '%s\n' "$DEPLOY_SSH_KEY" > "$ssh_dir/key"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+
+          ssh -T \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$ssh_dir/known_hosts" \
+            -o ConnectTimeout=20 \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=6 \
+            -i "$ssh_dir/key" \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" "deploy ${GITHUB_SHA}" \
+            < "$RUNNER_TEMP/deployment/api-image.tar.gz"
+
+      - name: Check public API and Swagger
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$DEPLOY_URL" == https://* ]]
+          from=$(date -u +%F)
+          to=$(date -ud tomorrow +%F)
+          calendar="/api/v1/schedules/00000000-0000-4000-8000-000000000001/calendar?from=${from}&to=${to}"
+          for path in /up /api/v1 /docs /docs/openapi.json "$calendar"; do
+            curl --fail --silent --show-error --output /dev/null \
+              --retry 12 --retry-all-errors --retry-delay 5 --max-time 15 \
+              "${DEPLOY_URL%/}${path}"
+          done
+          printf 'Deployed commit `%s`\n\n[API](%s/api/v1) · [Swagger](%s/docs)\n' \
+            "$GITHUB_SHA" "${DEPLOY_URL%/}" "${DEPLOY_URL%/}" >> "$GITHUB_STEP_SUMMARY"
