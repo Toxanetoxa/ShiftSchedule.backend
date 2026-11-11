@@ -413,7 +413,7 @@ docker compose exec -T app php artisan test --compact
 
 ## Production и автоматический деплой
 
-Для сервера `148.253.210.13` предусмотрены отдельные [compose.production.yaml](compose.production.yaml), [Dockerfile](docker/production/Dockerfile) и [workflow GitHub Actions](.github/workflows/deploy.yml). Локальный `compose.yaml` и команды `make up` / `make restart` по-прежнему предназначены для разработки: они не управляют production.
+Для production предусмотрены отдельные [compose.production.yaml](compose.production.yaml), [Dockerfile](docker/production/Dockerfile) и [workflow GitHub Actions](.github/workflows/deploy.yml). Локальный `compose.yaml` и команды `make up` / `make restart` по-прежнему предназначены для разработки: они не управляют production.
 
 Публичные адреса production-конфигурации:
 
@@ -422,7 +422,7 @@ docker compose exec -T app php artisan test --compact
 - [OpenAPI](https://test.api.shift-schedule.videoscale.pro/docs/openapi.json).
 - [Healthcheck](https://test.api.shift-schedule.videoscale.pro/up).
 
-Поддомен задаётся отдельной A-записью `test.api.shift-schedule` со значением `148.253.210.13` в DNS-зоне `videoscale.pro`. Записи основного сайта `videoscale.pro` при этом не меняются. Поддомен заменяет IP в публичном URL; сам адрес сервера остаётся доступен через DNS.
+Поддомен задаётся отдельной A-записью `test.api.shift-schedule` в DNS-зоне `videoscale.pro`, указывающей на сервер приложения. Записи основного сайта `videoscale.pro` при этом не меняются.
 
 ### Образ и HTTPS
 
@@ -431,8 +431,6 @@ Production-образ собирается для `linux/amd64` на базе `d
 При старте production entrypoint требует уже заданные `APP_KEY`, `DB_PASSWORD` и `SERVER_NAME`, кеширует конфигурацию, запускает `app:initialize`, затем кеширует маршруты и Blade-шаблоны. Существующий ключ не генерируется заново. Автоматические миграции и идемпотентные сиды работают так же, как описано выше.
 
 Caddy обслуживает PHP и HTTPS. В [Caddyfile](docker/production/Caddyfile) настроен ACME Let's Encrypt с профилем `shortlived`; Caddy получает доверенный сертификат для `SERVER_NAME` и продлевает его автоматически. Данные ACME и сертификаты сохраняются в томе `caddy_data`, служебная конфигурация — в `caddy_config`. Серверу нужны доступные снаружи TCP-порты `80` и `443`; дополнительно опубликован UDP `443` для HTTP/3. HTTP перенаправляется на HTTPS. Внутренний healthcheck использует `/up` на `127.0.0.1:8080` внутри контейнера и не зависит от готовности сертификата.
-
-Для HTTPS-запросов по IP браузеры не передают SNI. Настройка Caddy `default_sni` выбирает сертификат для `SERVER_NAME`, даже когда соединение приходит через внутренний адрес Docker.
 
 PostgreSQL не публикует порт на сервере: приложение обращается к нему через внутреннюю Docker-сеть. Тома `postgres_data` и `app_storage` сохраняют БД и файлы приложения при смене образа. Запросы ограничены по размеру до `1 MB`; rate limit Laravel продолжает действовать.
 
@@ -476,7 +474,7 @@ SSH использует `StrictHostKeyChecking=yes`; при изменении 
 
 | Variable | По умолчанию | Назначение |
 | --- | --- | --- |
-| `DEPLOY_HOST` | `148.253.210.13` | Адрес SSH-сервера |
+| `DEPLOY_HOST` | Задан в workflow | Адрес SSH-сервера; можно переопределить переменной репозитория |
 | `DEPLOY_USER` | `shiftschedule-deploy` | Пользователь ограниченного SSH-доступа |
 | `DEPLOY_URL` | `https://test.api.shift-schedule.videoscale.pro` | Публичный адрес для проверки HTTPS и ссылки environment |
 
@@ -561,9 +559,9 @@ mv /var/lib/shiftschedule/current-image.next /var/lib/shiftschedule/current-imag
 2. В `/etc/shiftschedule/app.env` задайте `SERVER_NAME=api.example.com` и `APP_URL=https://api.example.com`. Сохраните существующие `APP_KEY` и данные доступа к БД.
 3. В `CORS_ALLOWED_ORIGINS` перечислите origin клиентского приложения. Для текущего GitHub Pages это `https://toxanetoxa.github.io`, без пути репозитория. Домен API не является origin клиентского приложения.
 4. Пересоздайте `app` командой обслуживания выше. Caddy использует новый `SERVER_NAME` для HTTPS; не удаляйте его постоянный том.
-5. Обновите backend-переменную GitHub Actions `DEPLOY_URL`, чтобы CI проверял новый адрес. `DEPLOY_HOST` можно оставить IP, если SSH по нему сохраняется.
+5. Обновите backend-переменную GitHub Actions `DEPLOY_URL`, чтобы CI проверял новый адрес. `DEPLOY_HOST` меняйте только при изменении SSH-адреса сервера.
 6. В репозитории клиентского приложения задайте variable `VITE_API_BASE_URL=https://api.example.com/api` и повторно запустите его workflow публикации: адрес API встраивается в клиентскую сборку. Версия `v1` указывается в путях конкретных запросов клиента.
 
-Для текущего домена клиенту нужен `VITE_API_BASE_URL=https://test.api.shift-schedule.videoscale.pro/api`. Серверные `SERVER_NAME` и `APP_URL`, а также переменная CI `DEPLOY_URL` должны указывать на этот же домен; SSH-переменная `DEPLOY_HOST` остаётся `148.253.210.13`.
+Для текущего домена клиенту нужен `VITE_API_BASE_URL=https://test.api.shift-schedule.videoscale.pro/api`. Серверные `SERVER_NAME` и `APP_URL`, а также переменная CI `DEPLOY_URL` должны указывать на этот же домен. `DEPLOY_HOST` задаёт SSH-адрес сервера отдельно.
 
 Production-конфигурация оставляет демонстрационный режим: посетители могут читать и менять один общий график без входа. Для реальных пользователей необходимо добавить аутентификацию и проверку прав; выключение demo mode само по себе закрывает маршруты графика. `app:initialize` продолжает выполнять исходные сиды, включая тестовую запись пользователя.
