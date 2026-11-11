@@ -104,11 +104,11 @@ jobs:
     timeout-minutes: 15
     environment:
       name: production
-      url: ${{ vars.DEPLOY_URL || 'https://148.253.210.13' }}
+      url: ${{ vars.DEPLOY_URL || 'https://test.api.shift-schedule.videoscale.pro' }}
     env:
       DEPLOY_HOST: ${{ vars.DEPLOY_HOST || '148.253.210.13' }}
       DEPLOY_USER: ${{ vars.DEPLOY_USER || 'shiftschedule-deploy' }}
-      DEPLOY_URL: ${{ vars.DEPLOY_URL || 'https://148.253.210.13' }}
+      DEPLOY_URL: ${{ vars.DEPLOY_URL || 'https://test.api.shift-schedule.videoscale.pro' }}
     steps:
       - name: Download tested image
         uses: actions/download-artifact@v8

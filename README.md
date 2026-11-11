@@ -417,10 +417,12 @@ docker compose exec -T app php artisan test --compact
 
 Публичные адреса production-конфигурации:
 
-- [API](https://148.253.210.13/api/v1).
-- [Swagger UI](https://148.253.210.13/docs).
-- [OpenAPI](https://148.253.210.13/docs/openapi.json).
-- [Healthcheck](https://148.253.210.13/up).
+- [API](https://test.api.shift-schedule.videoscale.pro/api/v1).
+- [Swagger UI](https://test.api.shift-schedule.videoscale.pro/docs).
+- [OpenAPI](https://test.api.shift-schedule.videoscale.pro/docs/openapi.json).
+- [Healthcheck](https://test.api.shift-schedule.videoscale.pro/up).
+
+Поддомен задаётся отдельной A-записью `test.api.shift-schedule` со значением `148.253.210.13` в DNS-зоне `videoscale.pro`. Записи основного сайта `videoscale.pro` при этом не меняются. Поддомен заменяет IP в публичном URL; сам адрес сервера остаётся доступен через DNS.
 
 ### Образ и HTTPS
 
@@ -428,7 +430,7 @@ Production-образ собирается для `linux/amd64` на базе `d
 
 При старте production entrypoint требует уже заданные `APP_KEY`, `DB_PASSWORD` и `SERVER_NAME`, кеширует конфигурацию, запускает `app:initialize`, затем кеширует маршруты и Blade-шаблоны. Существующий ключ не генерируется заново. Автоматические миграции и идемпотентные сиды работают так же, как описано выше.
 
-Caddy обслуживает PHP и HTTPS. Для публичного IP в [Caddyfile](docker/production/Caddyfile) настроен ACME Let's Encrypt с профилем `shortlived`; Caddy получает и продлевает сертификат автоматически. Данные ACME и сертификаты сохраняются в томе `caddy_data`, служебная конфигурация — в `caddy_config`. Серверу нужны доступные снаружи TCP-порты `80` и `443`; дополнительно опубликован UDP `443` для HTTP/3. HTTP перенаправляется на HTTPS. Внутренний healthcheck использует `/up` на `127.0.0.1:8080` внутри контейнера и не зависит от готовности сертификата.
+Caddy обслуживает PHP и HTTPS. В [Caddyfile](docker/production/Caddyfile) настроен ACME Let's Encrypt с профилем `shortlived`; Caddy получает доверенный сертификат для `SERVER_NAME` и продлевает его автоматически. Данные ACME и сертификаты сохраняются в томе `caddy_data`, служебная конфигурация — в `caddy_config`. Серверу нужны доступные снаружи TCP-порты `80` и `443`; дополнительно опубликован UDP `443` для HTTP/3. HTTP перенаправляется на HTTPS. Внутренний healthcheck использует `/up` на `127.0.0.1:8080` внутри контейнера и не зависит от готовности сертификата.
 
 Для HTTPS-запросов по IP браузеры не передают SNI. Настройка Caddy `default_sni` выбирает сертификат для `SERVER_NAME`, даже когда соединение приходит через внутренний адрес Docker.
 
@@ -476,7 +478,7 @@ SSH использует `StrictHostKeyChecking=yes`; при изменении 
 | --- | --- | --- |
 | `DEPLOY_HOST` | `148.253.210.13` | Адрес SSH-сервера |
 | `DEPLOY_USER` | `shiftschedule-deploy` | Пользователь ограниченного SSH-доступа |
-| `DEPLOY_URL` | `https://148.253.210.13` | Публичный адрес для проверки HTTPS и ссылки environment |
+| `DEPLOY_URL` | `https://test.api.shift-schedule.videoscale.pro` | Публичный адрес для проверки HTTPS и ссылки environment |
 
 Deploy job использует GitHub environment `production`. Секреты и переменные можно задать на уровне репозитория либо этого environment. `APP_KEY` и пароль рабочей БД остаются только на сервере.
 
@@ -553,7 +555,7 @@ mv /var/lib/shiftschedule/current-image.next /var/lib/shiftschedule/current-imag
 
 Возврат образа сохраняет PostgreSQL и её текущую схему. Если требуется восстановить дамп, это отдельная административная операция с выбором нужной копии и оценкой потери изменений после её создания; deploy-скрипт её не выполняет. Не используйте `docker compose down -v` для перезапуска или отката: это удалит постоянные тома.
 
-### Переход на домен или другой адрес API
+### Смена домена или адреса API
 
 1. Настройте DNS домена на сервер и доступность портов `80` / `443`.
 2. В `/etc/shiftschedule/app.env` задайте `SERVER_NAME=api.example.com` и `APP_URL=https://api.example.com`. Сохраните существующие `APP_KEY` и данные доступа к БД.
@@ -562,6 +564,6 @@ mv /var/lib/shiftschedule/current-image.next /var/lib/shiftschedule/current-imag
 5. Обновите backend-переменную GitHub Actions `DEPLOY_URL`, чтобы CI проверял новый адрес. `DEPLOY_HOST` можно оставить IP, если SSH по нему сохраняется.
 6. В репозитории клиентского приложения задайте variable `VITE_API_BASE_URL=https://api.example.com/api/v1` и повторно запустите его workflow публикации: адрес API встраивается в клиентскую сборку.
 
-Для текущего адреса без домена клиенту нужен `VITE_API_BASE_URL=https://148.253.210.13/api/v1`.
+Для текущего домена клиенту нужен `VITE_API_BASE_URL=https://test.api.shift-schedule.videoscale.pro/api/v1`. Серверные `SERVER_NAME` и `APP_URL`, а также переменная CI `DEPLOY_URL` должны указывать на этот же домен; SSH-переменная `DEPLOY_HOST` остаётся `148.253.210.13`.
 
 Production-конфигурация оставляет демонстрационный режим: посетители могут читать и менять один общий график без входа. Для реальных пользователей необходимо добавить аутентификацию и проверку прав; выключение demo mode само по себе закрывает маршруты графика. `app:initialize` продолжает выполнять исходные сиды, включая тестовую запись пользователя.
