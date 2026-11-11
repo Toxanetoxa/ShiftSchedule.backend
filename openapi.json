@@ -1,0 +1,2276 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "ShiftSchedule API",
+    "version": "1.0.0",
+    "description": "API графика смен: чтение календаря, атомарное сохранение ячеек и неизменяемые публикации.\n\n### Как проверить API\n1. Выполните `GET /api/v1/schedules/{scheduleId}/calendar` с примером UUID и дат.\n2. Перед записью возьмите актуальную `schedule.version` из ответа и подставьте её в `expectedVersion`. Значение `1` в примерах подходит только для исходного графика.\n3. Выберите пример PATCH: шаблон, своя смена, ночная смена, очистка или перенос. `Execute` действительно изменяет данные сервера.\n4. После сохранения публикуйте с новой версией. Для чтения публикации используйте реальный `id` из ответа POST; пример UUID публикации не создаётся сидером.\n\n### Доступ\nВ демонстрационном режиме `SCHEDULE_DEMO_MODE=true` доступен только график `00000000-0000-4000-8000-000000000001`; сервер действует от лица `demo-manager`. Пользовательский вход и Bearer-токены в этом MVP не реализованы. При выключенном деморежиме маршруты графика отвечают `404 SCHEDULE_NOT_FOUND` до подключения настоящей авторизации. CRUD сотрудников и шаблонов не предоставляется.\n\n### Контракт\nJSON использует camelCase. Даты: `YYYY-MM-DD`; локальное время: `HH:mm`; UUID — строки. Диапазон `[from, to)` включает начало и не включает конец, максимум 62 дня. Часовой пояс берётся из графика (демо: Europe/Moscow), а не из браузера. Ночные смены относятся к локальной дате начала `workDate`.\n\n### Ограничение запросов и CORS\nВсе маршруты `/api/v1` разделяют лимит по IP; по умолчанию 10 запросов на секундное окно, настройка `API_RATE_LIMIT_PER_SECOND`. Смотрите фактический `X-RateLimit-Limit`; текущее окружение может переопределять значение. Превышение даёт `429` и `Retry-After`; при параллельных всплесках стандартный limiter допускает небольшой выход за порог. `/up` и CORS preflight не расходуют этот API-лимит. Разрешённые origin задаются через `CORS_ALLOWED_ORIGINS`, CORS не заменяет авторизацию. Swagger обращается к API на своём origin."
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "Текущий сервер (тот же origin, что и Swagger UI)"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Сервис",
+      "description": "Информация о сервисе и проверка доступности приложения."
+    },
+    {
+      "name": "График",
+      "description": "Календарь и атомарные изменения назначений."
+    },
+    {
+      "name": "Публикации",
+      "description": "Создание и чтение неизменяемых снимков сохранённого графика."
+    }
+  ],
+  "security": [],
+  "paths": {
+    "/api/v1": {
+      "get": {
+        "tags": [
+          "Сервис"
+        ],
+        "operationId": "getServiceInfo",
+        "summary": "Информация об API",
+        "description": "Возвращает имя приложения и статус. Не создаёт сессионную cookie. На маршрут распространяется общий лимит API.",
+        "responses": {
+          "200": {
+            "description": "API доступен.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceInfo"
+                },
+                "examples": {
+                  "service": {
+                    "summary": "Информация о сервисе",
+                    "value": {
+                      "service": "ShiftSchedule",
+                      "status": "ok"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          }
+        }
+      }
+    },
+    "/up": {
+      "get": {
+        "tags": [
+          "Сервис"
+        ],
+        "operationId": "getHealth",
+        "summary": "Проверка доступности Laravel",
+        "description": "Используется Docker healthcheck. При `Accept: application/json` возвращает JSON; иначе возможна HTML-страница Laravel. Не расходует API-лимит и не входит в CORS-пути. Доступность маршрута сама по себе не гарантирует доступность PostgreSQL: отдельные проверки зависимостей должны быть подключены через DiagnosingHealth.",
+        "responses": {
+          "200": {
+            "description": "Приложение загрузилось, обработчики DiagnosingHealth не сообщили ошибку.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthStatus"
+                },
+                "example": {
+                  "status": "up"
+                }
+              },
+              "text/html": {
+                "schema": {
+                  "type": "string",
+                  "description": "Стандартная диагностическая страница Laravel."
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Ошибка диагностики или загрузки приложения. При выключенном debug ожидается status=down; при debug ошибка может быть представлена стандартным обработчиком Laravel.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                },
+                "example": {
+                  "status": "down"
+                }
+              },
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/schedules/{scheduleId}/calendar": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ScheduleId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "График"
+        ],
+        "operationId": "getScheduleCalendar",
+        "summary": "Получить календарь графика",
+        "description": "Возвращает согласованный снимок версии, сотрудников, активных шаблонов, смен и покрытия. Сотрудники без назначений остаются в списке, покрытие включает нулевые дни. Ночная смена целиком учитывается по дате начала workDate. Восемь сотрудников и три шаблона создаются сидерами; назначения изначально пусты. Изображения аватаров в примере сокращены до небольшого SVG; реальные data URI содержат сгенерированные аватары.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/From"
+          },
+          {
+            "$ref": "#/components/parameters/To"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Календарь указанного диапазона.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CalendarResponse"
+                },
+                "examples": {
+                  "emptyCalendar": {
+                    "summary": "Исходный график без назначений",
+                    "value": {
+                      "schedule": {
+                        "id": "00000000-0000-4000-8000-000000000001",
+                        "name": "График",
+                        "timeZone": "Europe/Moscow",
+                        "version": 1
+                      },
+                      "range": {
+                        "from": "2026-11-09",
+                        "to": "2026-11-16"
+                      },
+                      "employees": [
+                        {
+                          "id": "00000000-0000-4000-8000-000000000201",
+                          "fullName": "Кузнецова Алина",
+                          "positionTitle": "Агент",
+                          "avatarUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+                          "scheduledMinutes": 0,
+                          "isActive": true
+                        },
+                        {
+                          "id": "00000000-0000-4000-8000-000000000202",
+                          "fullName": "Волков Тимур",
+                          "positionTitle": "Агент",
+                          "avatarUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+                          "scheduledMinutes": 0,
+                          "isActive": true
+                        },
+                        {
+                          "id": "00000000-0000-4000-8000-000000000203",
+                          "fullName": "Морозова Виктория",
+                          "positionTitle": "Агент",
+                          "avatarUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+                          "scheduledMinutes": 0,
+                          "isActive": true
+                        },
+                        {
+                          "id": "00000000-0000-4000-8000-000000000204",
+                          "fullName": "Соколов Артём",
+                          "positionTitle": "Агент",
+                          "avatarUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+                          "scheduledMinutes": 0,
+                          "isActive": true
+                        },
+                        {
+                          "id": "00000000-0000-4000-8000-000000000205",
+                          "fullName": "Лебедева Полина",
+                          "positionTitle": "Агент",
+                          "avatarUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+                          "scheduledMinutes": 0,
+                          "isActive": true
+                        },
+                        {
+                          "id": "00000000-0000-4000-8000-000000000206",
+                          "fullName": "Новиков Кирилл",
+                          "positionTitle": "Агент",
+                          "avatarUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+                          "scheduledMinutes": 0,
+                          "isActive": true
+                        },
+                        {
+                          "id": "00000000-0000-4000-8000-000000000207",
+                          "fullName": "Ерохина Дарья",
+                          "positionTitle": "Агент",
+                          "avatarUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+                          "scheduledMinutes": 0,
+                          "isActive": true
+                        },
+                        {
+                          "id": "00000000-0000-4000-8000-000000000208",
+                          "fullName": "Гаврилов Егор",
+                          "positionTitle": "Агент",
+                          "avatarUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+                          "scheduledMinutes": 0,
+                          "isActive": true
+                        }
+                      ],
+                      "shiftTemplates": [
+                        {
+                          "id": "00000000-0000-4000-8000-000000000101",
+                          "name": "Утро",
+                          "startTime": "07:00",
+                          "endTime": "15:00",
+                          "endDayOffset": 0,
+                          "durationMinutes": 480,
+                          "colorKey": "morning"
+                        },
+                        {
+                          "id": "00000000-0000-4000-8000-000000000102",
+                          "name": "День",
+                          "startTime": "10:00",
+                          "endTime": "18:00",
+                          "endDayOffset": 0,
+                          "durationMinutes": 480,
+                          "colorKey": "day"
+                        },
+                        {
+                          "id": "00000000-0000-4000-8000-000000000103",
+                          "name": "Вечер",
+                          "startTime": "15:00",
+                          "endTime": "23:00",
+                          "endDayOffset": 0,
+                          "durationMinutes": 480,
+                          "colorKey": "evening"
+                        }
+                      ],
+                      "shifts": [],
+                      "coverage": [
+                        {
+                          "date": "2026-11-09",
+                          "shiftCount": 0,
+                          "covered": false
+                        },
+                        {
+                          "date": "2026-11-10",
+                          "shiftCount": 0,
+                          "covered": false
+                        },
+                        {
+                          "date": "2026-11-11",
+                          "shiftCount": 0,
+                          "covered": false
+                        },
+                        {
+                          "date": "2026-11-12",
+                          "shiftCount": 0,
+                          "covered": false
+                        },
+                        {
+                          "date": "2026-11-13",
+                          "shiftCount": 0,
+                          "covered": false
+                        },
+                        {
+                          "date": "2026-11-14",
+                          "shiftCount": 0,
+                          "covered": false
+                        },
+                        {
+                          "date": "2026-11-15",
+                          "shiftCount": 0,
+                          "covered": false
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/ScheduleNotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/InvalidDateRange"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/api/v1/schedules/{scheduleId}/cells": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ScheduleId"
+        }
+      ],
+      "patch": {
+        "tags": [
+          "График"
+        ],
+        "operationId": "saveScheduleCells",
+        "summary": "Атомарно сохранить ячейки",
+        "description": "Задаёт итоговое содержимое от 1 до 2000 уникальных пар employeeId/workDate. `shift: null` очищает ячейку; неуказанные ячейки сохраняются. Изменения применяются целиком или полностью откатываются.\n\nШаблон требует sourceTemplateId и точного совпадения всех полей времени. Для собственной смены sourceTemplateId обязан быть null. Сервер сам рассчитывает UTC-моменты, длительность, название и цвет. Неизвестные поля отклоняются.\n\nВерсия проверяется до no-op. При фактических изменениях версия увеличивается на 1 за пакет, иначе остаётся прежней. Нельзя автоматически подменять expectedVersion после 409: перечитайте календарь и разрешите конфликт. После обрыва соединения результат PATCH может быть неизвестен; сначала перечитайте состояние. Idempotency-Key не поддерживается.\n\nПересечения фактических интервалов одного сотрудника проверяются также за пределами видимого периода и в других графиках. Соприкасающиеся интервалы допустимы. Корректный перенос отправляет очистку источника и назначение приёмника одним пакетом. Неактивному сотруднику запрещены новые или изменённые назначения, но существующее можно очистить.",
+        "requestBody": {
+          "required": true,
+          "description": "Content-Type: application/json. Положительные целые числа передаются JSON-числами; тело должно быть объектом.",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SaveCellsRequest"
+              },
+              "examples": {
+                "template": {
+                  "summary": "Назначить шаблон «Утро»",
+                  "value": {
+                    "expectedVersion": 1,
+                    "changes": [
+                      {
+                        "employeeId": "00000000-0000-4000-8000-000000000201",
+                        "workDate": "2026-11-09",
+                        "shift": {
+                          "startTime": "07:00",
+                          "endTime": "15:00",
+                          "endDayOffset": 0,
+                          "sourceTemplateId": "00000000-0000-4000-8000-000000000101"
+                        }
+                      }
+                    ]
+                  }
+                },
+                "custom": {
+                  "summary": "Создать свою смену 09:00–17:00",
+                  "value": {
+                    "expectedVersion": 1,
+                    "changes": [
+                      {
+                        "employeeId": "00000000-0000-4000-8000-000000000201",
+                        "workDate": "2026-11-09",
+                        "shift": {
+                          "startTime": "09:00",
+                          "endTime": "17:00",
+                          "endDayOffset": 0,
+                          "sourceTemplateId": null
+                        }
+                      }
+                    ]
+                  }
+                },
+                "night": {
+                  "summary": "Создать ночную смену 22:00–06:00",
+                  "value": {
+                    "expectedVersion": 1,
+                    "changes": [
+                      {
+                        "employeeId": "00000000-0000-4000-8000-000000000201",
+                        "workDate": "2026-11-09",
+                        "shift": {
+                          "startTime": "22:00",
+                          "endTime": "06:00",
+                          "endDayOffset": 1,
+                          "sourceTemplateId": null
+                        }
+                      }
+                    ]
+                  }
+                },
+                "clear": {
+                  "summary": "Очистить ячейку",
+                  "value": {
+                    "expectedVersion": 1,
+                    "changes": [
+                      {
+                        "employeeId": "00000000-0000-4000-8000-000000000201",
+                        "workDate": "2026-11-09",
+                        "shift": null
+                      }
+                    ]
+                  }
+                },
+                "transfer": {
+                  "summary": "Перенос: очистить источник и назначить приёмник",
+                  "value": {
+                    "expectedVersion": 1,
+                    "changes": [
+                      {
+                        "employeeId": "00000000-0000-4000-8000-000000000201",
+                        "workDate": "2026-11-09",
+                        "shift": null
+                      },
+                      {
+                        "employeeId": "00000000-0000-4000-8000-000000000202",
+                        "workDate": "2026-11-09",
+                        "shift": {
+                          "startTime": "07:00",
+                          "endTime": "15:00",
+                          "endDayOffset": 0,
+                          "sourceTemplateId": "00000000-0000-4000-8000-000000000101"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Итоговые состояния всех переданных ячеек и версия графика.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SaveCellsResponse"
+                },
+                "examples": {
+                  "assigned": {
+                    "summary": "Назначение сохранено",
+                    "value": {
+                      "version": 2,
+                      "changedCells": [
+                        {
+                          "employeeId": "00000000-0000-4000-8000-000000000201",
+                          "workDate": "2026-11-09",
+                          "shift": {
+                            "id": "00000000-0000-4000-8000-000000000301",
+                            "startTime": "07:00",
+                            "endTime": "15:00",
+                            "endDayOffset": 0,
+                            "sourceTemplateId": "00000000-0000-4000-8000-000000000101",
+                            "startsAt": "2026-11-09T04:00:00Z",
+                            "endsAt": "2026-11-09T12:00:00Z",
+                            "durationMinutes": 480,
+                            "label": "Утро",
+                            "colorKey": "morning"
+                          }
+                        }
+                      ]
+                    }
+                  },
+                  "cleared": {
+                    "summary": "Ячейка очищена; пример с фактическим изменением",
+                    "value": {
+                      "version": 2,
+                      "changedCells": [
+                        {
+                          "employeeId": "00000000-0000-4000-8000-000000000201",
+                          "workDate": "2026-11-09",
+                          "shift": null
+                        }
+                      ]
+                    }
+                  },
+                  "unchanged": {
+                    "summary": "Очистка уже пустой ячейки: версия не изменилась",
+                    "value": {
+                      "version": 1,
+                      "changedCells": [
+                        {
+                          "employeeId": "00000000-0000-4000-8000-000000000201",
+                          "workDate": "2026-11-09",
+                          "shift": null
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidJson"
+          },
+          "404": {
+            "$ref": "#/components/responses/ScheduleNotFound"
+          },
+          "409": {
+            "description": "Конфликт версии либо пересечение смен. Весь пакет откатан.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                },
+                "examples": {
+                  "version": {
+                    "summary": "Версия устарела",
+                    "value": {
+                      "error": {
+                        "code": "SCHEDULE_VERSION_CONFLICT",
+                        "message": "График изменён в другой сессии. Обновите данные перед сохранением.",
+                        "details": {
+                          "expectedVersion": 1,
+                          "currentVersion": 2
+                        }
+                      }
+                    }
+                  },
+                  "overlap": {
+                    "summary": "Пересечение фактических интервалов",
+                    "value": {
+                      "error": {
+                        "code": "SHIFT_OVERLAP",
+                        "message": "Смена пересекается с другим назначением сотрудника.",
+                        "details": {
+                          "employeeId": "00000000-0000-4000-8000-000000000201",
+                          "workDate": "2026-11-09",
+                          "field": "changes.0.shift",
+                          "conflictingWorkDate": "2026-11-08"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/InvalidCells"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/api/v1/schedules/{scheduleId}/publications": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ScheduleId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Публикации"
+        ],
+        "operationId": "publishSchedule",
+        "summary": "Опубликовать сохранённый диапазон",
+        "description": "Создаёт неизменяемый снимок всего сохранённого диапазона [from, to), включая имена, назначения, покрытие и итоги. Пустой по назначениям диапазон допустим. Версия рабочего графика не меняется. Несохранённые изменения фронтенда сюда не попадают — сначала сохраните их PATCH и передайте возвращённую версию. Повтор пары диапазон+expectedVersion возвращает ранее созданную публикацию с 200 даже после более поздних сохранений. Если такого снимка нет и версия устарела — 409. created_by задаётся сервером как demo-manager и не принимается от клиента.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublishRequest"
+              },
+              "example": {
+                "expectedVersion": 1,
+                "from": "2026-11-09",
+                "to": "2026-11-16"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Эта версия и диапазон уже опубликованы; возвращены метаданные существующего снимка.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicationMetadata"
+                },
+                "examples": {
+                  "repeated": {
+                    "summary": "Идемпотентный повтор",
+                    "value": {
+                      "id": "00000000-0000-4000-8000-000000000401",
+                      "scheduleId": "00000000-0000-4000-8000-000000000001",
+                      "range": {
+                        "from": "2026-11-09",
+                        "to": "2026-11-16"
+                      },
+                      "sourceVersion": 1,
+                      "publishedAt": "2026-11-09T11:30:00Z"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Создан новый неизменяемый снимок.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicationMetadata"
+                },
+                "examples": {
+                  "created": {
+                    "summary": "Метаданные новой публикации",
+                    "value": {
+                      "id": "00000000-0000-4000-8000-000000000401",
+                      "scheduleId": "00000000-0000-4000-8000-000000000001",
+                      "range": {
+                        "from": "2026-11-09",
+                        "to": "2026-11-16"
+                      },
+                      "sourceVersion": 1,
+                      "publishedAt": "2026-11-09T11:30:00Z"
+                    }
+                  }
+                }
+              }
+            },
+            "links": {
+              "readPublication": {
+                "operationId": "getSchedulePublication",
+                "parameters": {
+                  "scheduleId": "$response.body#/scheduleId",
+                  "publicationId": "$response.body#/id"
+                },
+                "description": "Прочитать созданную публикацию по её фактическому UUID."
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidJson"
+          },
+          "404": {
+            "$ref": "#/components/responses/ScheduleNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/VersionConflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/InvalidPublication"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/api/v1/schedules/{scheduleId}/publications/{publicationId}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ScheduleId"
+        },
+        {
+          "$ref": "#/components/parameters/PublicationId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "Публикации"
+        ],
+        "operationId": "getSchedulePublication",
+        "summary": "Прочитать опубликованный снимок",
+        "description": "Возвращает именно указанную публикацию, а не текущий рабочий календарь. Используйте id из POST публикации; сидеры публикаций не создают. Исторические поля берутся из сохранённого snapshot и не подтягиваются заново из справочников. Внешний URL аватара в снимке не гарантирует неизменности содержимого удалённого изображения. Публикации с перекрывающимися диапазонами не объединяются автоматически.",
+        "responses": {
+          "200": {
+            "description": "Метаданные и неизменяемый снимок.",
+            "headers": {
+              "X-RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "X-RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicationResponse"
+                },
+                "examples": {
+                  "snapshot": {
+                    "summary": "Публикация исходного пустого графика",
+                    "value": {
+                      "id": "00000000-0000-4000-8000-000000000401",
+                      "scheduleId": "00000000-0000-4000-8000-000000000001",
+                      "range": {
+                        "from": "2026-11-09",
+                        "to": "2026-11-16"
+                      },
+                      "sourceVersion": 1,
+                      "publishedAt": "2026-11-09T11:30:00Z",
+                      "snapshot": {
+                        "schemaVersion": 1,
+                        "schedule": {
+                          "id": "00000000-0000-4000-8000-000000000001",
+                          "name": "График",
+                          "timeZone": "Europe/Moscow",
+                          "version": 1
+                        },
+                        "range": {
+                          "from": "2026-11-09",
+                          "to": "2026-11-16"
+                        },
+                        "employees": [
+                          {
+                            "id": "00000000-0000-4000-8000-000000000201",
+                            "fullName": "Кузнецова Алина",
+                            "positionTitle": "Агент",
+                            "avatarUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+                            "scheduledMinutes": 0,
+                            "isActive": true
+                          },
+                          {
+                            "id": "00000000-0000-4000-8000-000000000202",
+                            "fullName": "Волков Тимур",
+                            "positionTitle": "Агент",
+                            "avatarUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+                            "scheduledMinutes": 0,
+                            "isActive": true
+                          },
+                          {
+                            "id": "00000000-0000-4000-8000-000000000203",
+                            "fullName": "Морозова Виктория",
+                            "positionTitle": "Агент",
+                            "avatarUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+                            "scheduledMinutes": 0,
+                            "isActive": true
+                          },
+                          {
+                            "id": "00000000-0000-4000-8000-000000000204",
+                            "fullName": "Соколов Артём",
+                            "positionTitle": "Агент",
+                            "avatarUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+                            "scheduledMinutes": 0,
+                            "isActive": true
+                          },
+                          {
+                            "id": "00000000-0000-4000-8000-000000000205",
+                            "fullName": "Лебедева Полина",
+                            "positionTitle": "Агент",
+                            "avatarUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+                            "scheduledMinutes": 0,
+                            "isActive": true
+                          },
+                          {
+                            "id": "00000000-0000-4000-8000-000000000206",
+                            "fullName": "Новиков Кирилл",
+                            "positionTitle": "Агент",
+                            "avatarUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+                            "scheduledMinutes": 0,
+                            "isActive": true
+                          },
+                          {
+                            "id": "00000000-0000-4000-8000-000000000207",
+                            "fullName": "Ерохина Дарья",
+                            "positionTitle": "Агент",
+                            "avatarUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+                            "scheduledMinutes": 0,
+                            "isActive": true
+                          },
+                          {
+                            "id": "00000000-0000-4000-8000-000000000208",
+                            "fullName": "Гаврилов Егор",
+                            "positionTitle": "Агент",
+                            "avatarUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=",
+                            "scheduledMinutes": 0,
+                            "isActive": true
+                          }
+                        ],
+                        "shifts": [],
+                        "coverage": [
+                          {
+                            "date": "2026-11-09",
+                            "shiftCount": 0,
+                            "covered": false
+                          },
+                          {
+                            "date": "2026-11-10",
+                            "shiftCount": 0,
+                            "covered": false
+                          },
+                          {
+                            "date": "2026-11-11",
+                            "shiftCount": 0,
+                            "covered": false
+                          },
+                          {
+                            "date": "2026-11-12",
+                            "shiftCount": 0,
+                            "covered": false
+                          },
+                          {
+                            "date": "2026-11-13",
+                            "shiftCount": 0,
+                            "covered": false
+                          },
+                          {
+                            "date": "2026-11-14",
+                            "shiftCount": 0,
+                            "covered": false
+                          },
+                          {
+                            "date": "2026-11-15",
+                            "shiftCount": 0,
+                            "covered": false
+                          }
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/PublicationNotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "ScheduleId": {
+        "name": "scheduleId",
+        "in": "path",
+        "required": true,
+        "description": "UUID графика. В демонстрационном режиме доступен только UUID из примера.",
+        "schema": {
+          "type": "string",
+          "format": "uuid",
+          "example": "00000000-0000-4000-8000-000000000001"
+        }
+      },
+      "PublicationId": {
+        "name": "publicationId",
+        "in": "path",
+        "required": true,
+        "description": "UUID из ответа POST /publications. Указанный пример иллюстративный, сидер эту публикацию не создаёт.",
+        "schema": {
+          "type": "string",
+          "format": "uuid",
+          "example": "00000000-0000-4000-8000-000000000401"
+        }
+      },
+      "From": {
+        "name": "from",
+        "in": "query",
+        "required": true,
+        "description": "Начало диапазона включительно. Диапазон должен включать 1–62 дня.",
+        "schema": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "example": "2026-11-09"
+        }
+      },
+      "To": {
+        "name": "to",
+        "in": "query",
+        "required": true,
+        "description": "Конец диапазона исключительно; строго позже from и не более чем на 62 дня.",
+        "schema": {
+          "type": "string",
+          "format": "date",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+          "example": "2026-11-16"
+        }
+      }
+    },
+    "headers": {
+      "RateLimitLimit": {
+        "description": "Настроенная максимальная частота запросов одного IP в секундном окне. По умолчанию 10, но значение может быть переопределено через .env.",
+        "schema": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "example": 10
+      },
+      "RateLimitRemaining": {
+        "description": "Оставшиеся запросы в текущем окне.",
+        "schema": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "example": 9
+      },
+      "RetryAfter": {
+        "description": "Через сколько секунд можно повторить запрос.",
+        "schema": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "example": 1
+      },
+      "RateLimitReset": {
+        "description": "Unix timestamp окончания текущего окна лимита.",
+        "schema": {
+          "type": "integer",
+          "format": "int64"
+        }
+      }
+    },
+    "responses": {
+      "ScheduleNotFound": {
+        "description": "График отсутствует, недоступен в деморежиме или деморежим выключен.",
+        "headers": {
+          "X-RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimitLimit"
+          },
+          "X-RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimitRemaining"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "examples": {
+              "notFound": {
+                "summary": "График недоступен",
+                "value": {
+                  "error": {
+                    "code": "SCHEDULE_NOT_FOUND",
+                    "message": "График не найден.",
+                    "details": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "PublicationNotFound": {
+        "description": "График недоступен либо публикация не существует, имеет неверный UUID или принадлежит другому графику.",
+        "headers": {
+          "X-RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimitLimit"
+          },
+          "X-RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimitRemaining"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "examples": {
+              "schedule": {
+                "summary": "График недоступен",
+                "value": {
+                  "error": {
+                    "code": "SCHEDULE_NOT_FOUND",
+                    "message": "График не найден.",
+                    "details": {}
+                  }
+                }
+              },
+              "publication": {
+                "summary": "Публикация недоступна",
+                "value": {
+                  "error": {
+                    "code": "PUBLICATION_NOT_FOUND",
+                    "message": "Публикация не найдена.",
+                    "details": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "InvalidJson": {
+        "description": "Тело запроса не является синтаксически корректным JSON. JSON-массив или скаляр вместо объекта, а также неверный Content-Type возвращают 422 VALIDATION_FAILED.",
+        "headers": {
+          "X-RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimitLimit"
+          },
+          "X-RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimitRemaining"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "examples": {
+              "invalidJson": {
+                "summary": "Невалидный JSON",
+                "value": {
+                  "error": {
+                    "code": "INVALID_JSON",
+                    "message": "Не удалось разобрать JSON запроса.",
+                    "details": {}
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "InvalidDateRange": {
+        "description": "Отсутствующие, несуществующие или неверно отформатированные даты; from >= to; диапазон длиннее 62 дней.",
+        "headers": {
+          "X-RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimitLimit"
+          },
+          "X-RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimitRemaining"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "examples": {
+              "range": {
+                "summary": "Некорректный диапазон",
+                "value": {
+                  "error": {
+                    "code": "INVALID_DATE_RANGE",
+                    "message": "Диапазон должен включать от 1 до 62 дней; дата to не включается.",
+                    "details": {
+                      "from": "2026-11-16",
+                      "to": "2026-11-09"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "VersionConflict": {
+        "description": "Нет публикации для запрошенной версии и диапазона, а expectedVersion не совпадает с текущей версией.",
+        "headers": {
+          "X-RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimitLimit"
+          },
+          "X-RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimitRemaining"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "examples": {
+              "conflict": {
+                "summary": "Версия устарела",
+                "value": {
+                  "error": {
+                    "code": "SCHEDULE_VERSION_CONFLICT",
+                    "message": "График изменён в другой сессии. Обновите данные перед публикацией.",
+                    "details": {
+                      "expectedVersion": 1,
+                      "currentVersion": 2
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "InvalidPublication": {
+        "description": "INVALID_DATE_RANGE — неверные даты или длина диапазона. VALIDATION_FAILED — неверная expectedVersion, неизвестное поле, тело не объект или Content-Type не JSON.",
+        "headers": {
+          "X-RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimitLimit"
+          },
+          "X-RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimitRemaining"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "examples": {
+              "range": {
+                "summary": "Некорректный диапазон",
+                "value": {
+                  "error": {
+                    "code": "INVALID_DATE_RANGE",
+                    "message": "Диапазон должен включать от 1 до 62 дней; дата to не включается.",
+                    "details": {
+                      "from": "2026-11-09",
+                      "to": "2026-11-09"
+                    }
+                  }
+                }
+              },
+              "version": {
+                "summary": "Ожидалось положительное JSON-целое",
+                "value": {
+                  "error": {
+                    "code": "VALIDATION_FAILED",
+                    "message": "Проверьте формат и обязательные поля запроса.",
+                    "details": {
+                      "field": "expectedVersion",
+                      "fields": {
+                        "expectedVersion": [
+                          "Поле expectedVersion должно быть целым числом."
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "InvalidCells": {
+        "description": "Ошибка валидации, ни одна ячейка не сохранена.\n| Код | Причина |\n| --- | --- |\n| VALIDATION_FAILED | Формат/тип/обязательные поля, неизвестные поля, больше 2000 изменений или неподходящий Content-Type. |\n| EMPTY_CHANGESET | Массив changes пуст. |\n| DUPLICATE_CELL_CHANGE | Повтор employeeId/workDate в одном пакете. |\n| INVALID_SHIFT_TIME | Некорректное локальное время, равные начало/конец, длительность вне 1–1439 минут, несуществующее или неоднозначное время при переходе часового пояса. |\n| EMPLOYEE_NOT_IN_SCHEDULE | Сотрудник не входит в этот график. |\n| EMPLOYEE_INACTIVE | Новое или изменённое назначение неактивному сотруднику/участнику графика. |\n| TEMPLATE_NOT_FOUND | Шаблон не найден в этом графике. |\n| TEMPLATE_INACTIVE | Шаблон неактивен. |\n| TEMPLATE_VALUES_MISMATCH | Переданные времена не совпадают с выбранным шаблоном. |",
+        "headers": {
+          "X-RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimitLimit"
+          },
+          "X-RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimitRemaining"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "examples": {
+              "validation": {
+                "summary": "Неверное поле",
+                "value": {
+                  "error": {
+                    "code": "VALIDATION_FAILED",
+                    "message": "Проверьте формат и обязательные поля запроса.",
+                    "details": {
+                      "field": "changes.0.shift.startTime",
+                      "employeeId": "00000000-0000-4000-8000-000000000201",
+                      "workDate": "2026-11-09",
+                      "fields": {
+                        "changes.0.shift.startTime": [
+                          "Укажите время в формате HH:mm."
+                        ]
+                      }
+                    }
+                  }
+                }
+              },
+              "empty": {
+                "summary": "Пустой пакет",
+                "value": {
+                  "error": {
+                    "code": "EMPTY_CHANGESET",
+                    "message": "Список изменённых ячеек не может быть пустым.",
+                    "details": {}
+                  }
+                }
+              },
+              "duplicate": {
+                "summary": "Повтор ячейки",
+                "value": {
+                  "error": {
+                    "code": "DUPLICATE_CELL_CHANGE",
+                    "message": "Ячейка повторяется в одном запросе.",
+                    "details": {
+                      "employeeId": "00000000-0000-4000-8000-000000000201",
+                      "workDate": "2026-11-09",
+                      "field": "changes.1"
+                    }
+                  }
+                }
+              },
+              "time": {
+                "summary": "Недопустимая длительность",
+                "value": {
+                  "error": {
+                    "code": "INVALID_SHIFT_TIME",
+                    "message": "Длительность смены должна быть больше нуля и меньше 24 часов.",
+                    "details": {
+                      "employeeId": "00000000-0000-4000-8000-000000000201",
+                      "workDate": "2026-11-09",
+                      "field": "changes.0.shift"
+                    }
+                  }
+                }
+              },
+              "template": {
+                "summary": "Время не соответствует шаблону",
+                "value": {
+                  "error": {
+                    "code": "TEMPLATE_VALUES_MISMATCH",
+                    "message": "Время смены не совпадает с выбранным шаблоном.",
+                    "details": {
+                      "employeeId": "00000000-0000-4000-8000-000000000201",
+                      "workDate": "2026-11-09",
+                      "field": "changes.0.shift"
+                    }
+                  }
+                }
+              },
+              "employee": {
+                "summary": "Сотрудник не включён в график",
+                "value": {
+                  "error": {
+                    "code": "EMPLOYEE_NOT_IN_SCHEDULE",
+                    "message": "Сотрудник не включён в график.",
+                    "details": {
+                      "employeeId": "00000000-0000-4000-8000-000000000201",
+                      "workDate": "2026-11-09",
+                      "field": "changes.0.employeeId"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "Превышен общий лимит API для IP. Соблюдайте Retry-After перед повтором. Фактический лимит задаётся API_RATE_LIMIT_PER_SECOND.",
+        "headers": {
+          "X-RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimitLimit"
+          },
+          "X-RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimitRemaining"
+          },
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          },
+          "X-RateLimit-Reset": {
+            "$ref": "#/components/headers/RateLimitReset"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "examples": {
+              "limited": {
+                "summary": "Слишком много запросов",
+                "value": {
+                  "error": {
+                    "code": "RATE_LIMIT_EXCEEDED",
+                    "message": "Слишком много запросов. Повторите попытку позже.",
+                    "details": {
+                      "retryAfter": 1
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "Внутренняя ошибка маршрута графика. requestId позволяет найти запись в серверном журнале; SQL и stack trace не передаются.",
+        "headers": {
+          "X-RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimitLimit"
+          },
+          "X-RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimitRemaining"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            },
+            "examples": {
+              "internal": {
+                "summary": "Неожиданная ошибка",
+                "value": {
+                  "error": {
+                    "code": "INTERNAL_ERROR",
+                    "message": "Не удалось выполнить запрос.",
+                    "details": {
+                      "requestId": "00000000-0000-4000-8000-000000000501"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "ServiceInfo": {
+        "type": "object",
+        "required": [
+          "service",
+          "status"
+        ],
+        "properties": {
+          "service": {
+            "type": "string",
+            "description": "Имя приложения APP_NAME.",
+            "example": "ShiftSchedule"
+          },
+          "status": {
+            "type": "string",
+            "description": "Сервис доступен.",
+            "enum": [
+              "ok"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "HealthStatus": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "up — приложение отвечает, down — проверка DiagnosingHealth завершилась ошибкой.",
+            "enum": [
+              "up",
+              "down"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "Schedule": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "timeZone",
+          "version"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Идентификатор графика.",
+            "format": "uuid",
+            "example": "00000000-0000-4000-8000-000000000001"
+          },
+          "name": {
+            "type": "string",
+            "description": "Название графика.",
+            "example": "График"
+          },
+          "timeZone": {
+            "type": "string",
+            "description": "IANA-часовой пояс графика; неизменяем после создания.",
+            "example": "Europe/Moscow"
+          },
+          "version": {
+            "type": "integer",
+            "description": "Текущая версия сохранённых назначений. Используется как expectedVersion при записи.",
+            "format": "int64",
+            "minimum": 1,
+            "example": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "DateRange": {
+        "type": "object",
+        "description": "Полуоткрытый диапазон [from, to), от 1 до 62 календарных дней. Связь полей проверяется сервером.",
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "description": "Начало диапазона включительно, в локальных календарных датах графика.",
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-11-09"
+          },
+          "to": {
+            "type": "string",
+            "description": "Конец диапазона исключительно. Между from и to от 1 до 62 календарных дней.",
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-11-16"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Employee": {
+        "type": "object",
+        "required": [
+          "id",
+          "fullName",
+          "positionTitle",
+          "avatarUrl",
+          "scheduledMinutes",
+          "isActive"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Идентификатор сотрудника.",
+            "format": "uuid",
+            "example": "00000000-0000-4000-8000-000000000201"
+          },
+          "fullName": {
+            "type": "string",
+            "description": "Имя для отображения.",
+            "example": "Кузнецова Алина"
+          },
+          "positionTitle": {
+            "type": "string",
+            "description": "Должность.",
+            "example": "Агент"
+          },
+          "avatarUrl": {
+            "type": "string",
+            "description": "URL изображения или data URI SVG, генерируемый DiceBear при создании сотрудника; также может быть null. Поле не ограничено HTTP-адресом.",
+            "nullable": true,
+            "example": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4="
+          },
+          "scheduledMinutes": {
+            "type": "integer",
+            "description": "Сумма фактических длительностей смен сотрудника, чья workDate входит в запрошенный диапазон.",
+            "minimum": 0,
+            "example": 0
+          },
+          "isActive": {
+            "type": "boolean",
+            "description": "Одновременно активны сотрудник и его участие в графике. Неактивные сотрудники и их существующие смены остаются видимыми.",
+            "example": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ShiftTemplate": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "startTime",
+          "endTime",
+          "endDayOffset",
+          "durationMinutes",
+          "colorKey"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Идентификатор активного шаблона этого графика.",
+            "format": "uuid",
+            "example": "00000000-0000-4000-8000-000000000101"
+          },
+          "name": {
+            "type": "string",
+            "description": "Название шаблона.",
+            "example": "Утро"
+          },
+          "startTime": {
+            "type": "string",
+            "description": "Локальное время начала в часовом поясе графика, строго HH:mm.",
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            "example": "07:00"
+          },
+          "endTime": {
+            "type": "string",
+            "description": "Локальное время окончания. При endDayOffset=0 позже начала, при 1 — раньше начала; одинаковые времена запрещены.",
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            "example": "15:00"
+          },
+          "endDayOffset": {
+            "type": "integer",
+            "description": "0 — окончание в workDate, 1 — на следующий локальный день. JSON-число, не строка и не boolean.",
+            "enum": [
+              0,
+              1
+            ],
+            "example": 0
+          },
+          "durationMinutes": {
+            "type": "integer",
+            "description": "Продолжительность по локальным часам шаблона; фактическая длительность назначения рассчитывается для его даты.",
+            "minimum": 1,
+            "maximum": 1439,
+            "example": 480
+          },
+          "colorKey": {
+            "type": "string",
+            "description": "Семантический ключ цвета.",
+            "example": "morning"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Shift": {
+        "type": "object",
+        "description": "Сохранённое назначение. Соседние интервалы могут соприкасаться, но не пересекаться.",
+        "required": [
+          "id",
+          "employeeId",
+          "workDate",
+          "startTime",
+          "endTime",
+          "endDayOffset",
+          "startsAt",
+          "endsAt",
+          "durationMinutes",
+          "sourceTemplateId",
+          "label",
+          "colorKey"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Идентификатор назначения, создаваемый сервером.",
+            "format": "uuid",
+            "example": "00000000-0000-4000-8000-000000000301"
+          },
+          "employeeId": {
+            "type": "string",
+            "description": "Сотрудник, которому назначена смена.",
+            "format": "uuid",
+            "example": "00000000-0000-4000-8000-000000000201"
+          },
+          "workDate": {
+            "type": "string",
+            "description": "Локальная дата начала смены. Ночная смена относится к этой дате и для итогов, и для покрытия.",
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-11-09"
+          },
+          "startTime": {
+            "type": "string",
+            "description": "Локальное время начала в часовом поясе графика, строго HH:mm.",
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            "example": "07:00"
+          },
+          "endTime": {
+            "type": "string",
+            "description": "Локальное время окончания. При endDayOffset=0 позже начала, при 1 — раньше начала; одинаковые времена запрещены.",
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            "example": "15:00"
+          },
+          "endDayOffset": {
+            "type": "integer",
+            "description": "0 — окончание в workDate, 1 — на следующий локальный день. JSON-число, не строка и не boolean.",
+            "enum": [
+              0,
+              1
+            ],
+            "example": 0
+          },
+          "startsAt": {
+            "type": "string",
+            "description": "Нормализованный момент начала в UTC.",
+            "format": "date-time",
+            "example": "2026-11-09T04:00:00Z"
+          },
+          "endsAt": {
+            "type": "string",
+            "description": "Нормализованный момент окончания в UTC; правая граница не включается.",
+            "format": "date-time",
+            "example": "2026-11-09T12:00:00Z"
+          },
+          "durationMinutes": {
+            "type": "integer",
+            "description": "Фактическая длительность по UTC-моментам, рассчитанная сервером.",
+            "minimum": 1,
+            "maximum": 1439,
+            "example": 480
+          },
+          "sourceTemplateId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "description": "Шаблон-источник или null для собственной смены.",
+            "example": "00000000-0000-4000-8000-000000000101"
+          },
+          "label": {
+            "type": "string",
+            "description": "Снимок имени шаблона или «Своя смена». Изменение справочника не переименовывает сохранённую смену.",
+            "example": "Утро"
+          },
+          "colorKey": {
+            "type": "string",
+            "description": "Снимок семантического цвета шаблона или custom.",
+            "example": "morning"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CellShift": {
+        "type": "object",
+        "description": "Нормализованная смена внутри changedCells; employeeId и workDate находятся в объекте ячейки, а не внутри shift.",
+        "required": [
+          "id",
+          "startTime",
+          "endTime",
+          "endDayOffset",
+          "startsAt",
+          "endsAt",
+          "durationMinutes",
+          "sourceTemplateId",
+          "label",
+          "colorKey"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Идентификатор назначения, создаваемый сервером.",
+            "format": "uuid",
+            "example": "00000000-0000-4000-8000-000000000301"
+          },
+          "startTime": {
+            "type": "string",
+            "description": "Локальное время начала в часовом поясе графика, строго HH:mm.",
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            "example": "07:00"
+          },
+          "endTime": {
+            "type": "string",
+            "description": "Локальное время окончания. При endDayOffset=0 позже начала, при 1 — раньше начала; одинаковые времена запрещены.",
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            "example": "15:00"
+          },
+          "endDayOffset": {
+            "type": "integer",
+            "description": "0 — окончание в workDate, 1 — на следующий локальный день. JSON-число, не строка и не boolean.",
+            "enum": [
+              0,
+              1
+            ],
+            "example": 0
+          },
+          "startsAt": {
+            "type": "string",
+            "description": "Нормализованный момент начала в UTC.",
+            "format": "date-time",
+            "example": "2026-11-09T04:00:00Z"
+          },
+          "endsAt": {
+            "type": "string",
+            "description": "Нормализованный момент окончания в UTC; правая граница не включается.",
+            "format": "date-time",
+            "example": "2026-11-09T12:00:00Z"
+          },
+          "durationMinutes": {
+            "type": "integer",
+            "description": "Фактическая длительность по UTC-моментам, рассчитанная сервером.",
+            "minimum": 1,
+            "maximum": 1439,
+            "example": 480
+          },
+          "sourceTemplateId": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "description": "Шаблон-источник или null для собственной смены.",
+            "example": "00000000-0000-4000-8000-000000000101"
+          },
+          "label": {
+            "type": "string",
+            "description": "Снимок имени шаблона или «Своя смена». Изменение справочника не переименовывает сохранённую смену.",
+            "example": "Утро"
+          },
+          "colorKey": {
+            "type": "string",
+            "description": "Снимок семантического цвета шаблона или custom.",
+            "example": "morning"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Coverage": {
+        "type": "object",
+        "required": [
+          "date",
+          "shiftCount",
+          "covered"
+        ],
+        "properties": {
+          "date": {
+            "type": "string",
+            "description": "Каждая локальная дата запрошенного диапазона, включая дни без смен.",
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-11-09"
+          },
+          "shiftCount": {
+            "type": "integer",
+            "description": "Количество назначений с workDate, равной date. Это не минимальная потребность в сотрудниках.",
+            "minimum": 0,
+            "example": 0
+          },
+          "covered": {
+            "type": "boolean",
+            "description": "Равно shiftCount > 0.",
+            "example": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "CalendarResponse": {
+        "type": "object",
+        "description": "Согласованное чтение версии, назначений и агрегатов из одного снимка PostgreSQL.",
+        "required": [
+          "schedule",
+          "range",
+          "employees",
+          "shiftTemplates",
+          "shifts",
+          "coverage"
+        ],
+        "properties": {
+          "schedule": {
+            "$ref": "#/components/schemas/Schedule"
+          },
+          "range": {
+            "$ref": "#/components/schemas/DateRange"
+          },
+          "employees": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Employee"
+            },
+            "description": "Полный состав графика в порядке sort_order, затем UUID. Сотрудники без смен также включены."
+          },
+          "shiftTemplates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ShiftTemplate"
+            },
+            "description": "Только активные шаблоны графика в порядке sort_order, затем UUID."
+          },
+          "shifts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Shift"
+            },
+            "description": "Назначения с from <= workDate < to. Сортировка: workDate, employeeId, id."
+          },
+          "coverage": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Coverage"
+            },
+            "description": "Все даты диапазона по возрастанию.",
+            "minItems": 1,
+            "maxItems": 62
+          }
+        },
+        "additionalProperties": false
+      },
+      "CustomShiftInput": {
+        "type": "object",
+        "description": "Своя смена. Передаются все четыре поля; label, colorKey, durationMinutes и UTC-моменты задаёт сервер. Локальная и фактическая длительности должны составлять 1–1439 минут. Неоднозначное или несуществующее локальное время при переходах часового пояса отклоняется.",
+        "required": [
+          "startTime",
+          "endTime",
+          "endDayOffset",
+          "sourceTemplateId"
+        ],
+        "properties": {
+          "startTime": {
+            "type": "string",
+            "description": "Локальное время начала в часовом поясе графика, строго HH:mm.",
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            "example": "07:00"
+          },
+          "endTime": {
+            "type": "string",
+            "description": "Локальное время окончания. При endDayOffset=0 позже начала, при 1 — раньше начала; одинаковые времена запрещены.",
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            "example": "15:00"
+          },
+          "endDayOffset": {
+            "type": "integer",
+            "description": "0 — окончание в workDate, 1 — на следующий локальный день. JSON-число, не строка и не boolean.",
+            "enum": [
+              0,
+              1
+            ],
+            "example": 0
+          },
+          "sourceTemplateId": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              null
+            ],
+            "description": "Для собственной смены поле обязательно и равно JSON null.",
+            "example": null
+          }
+        },
+        "additionalProperties": false
+      },
+      "TemplateShiftInput": {
+        "type": "object",
+        "description": "Назначение по шаблону: передайте UUID шаблона вместе с его временем, а не только UUID.",
+        "required": [
+          "startTime",
+          "endTime",
+          "endDayOffset",
+          "sourceTemplateId"
+        ],
+        "properties": {
+          "startTime": {
+            "type": "string",
+            "description": "Локальное время начала в часовом поясе графика, строго HH:mm.",
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            "example": "07:00"
+          },
+          "endTime": {
+            "type": "string",
+            "description": "Локальное время окончания. При endDayOffset=0 позже начала, при 1 — раньше начала; одинаковые времена запрещены.",
+            "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+            "example": "15:00"
+          },
+          "endDayOffset": {
+            "type": "integer",
+            "description": "0 — окончание в workDate, 1 — на следующий локальный день. JSON-число, не строка и не boolean.",
+            "enum": [
+              0,
+              1
+            ],
+            "example": 0
+          },
+          "sourceTemplateId": {
+            "type": "string",
+            "description": "UUID активного шаблона этого графика. Все три поля времени должны точно совпадать с шаблоном. После ручного изменения времени используйте собственную смену с null.",
+            "format": "uuid",
+            "example": "00000000-0000-4000-8000-000000000101"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ClearedShift": {
+        "type": "object",
+        "nullable": true,
+        "enum": [
+          null
+        ],
+        "description": "JSON null очищает ячейку. Пустой объект не является очисткой.",
+        "example": null
+      },
+      "CellChange": {
+        "type": "object",
+        "required": [
+          "employeeId",
+          "workDate",
+          "shift"
+        ],
+        "properties": {
+          "employeeId": {
+            "type": "string",
+            "description": "UUID сотрудника, включённого в этот график.",
+            "format": "uuid",
+            "example": "00000000-0000-4000-8000-000000000201"
+          },
+          "workDate": {
+            "type": "string",
+            "description": "Локальная дата начала смены.",
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-11-09"
+          },
+          "shift": {
+            "description": "Итоговое содержимое ячейки: своя смена, смена по шаблону либо null для удаления.",
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CustomShiftInput"
+              },
+              {
+                "$ref": "#/components/schemas/TemplateShiftInput"
+              },
+              {
+                "$ref": "#/components/schemas/ClearedShift"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "SaveCellsRequest": {
+        "type": "object",
+        "description": "JSON-объект. Неизвестные поля на любом уровне отклоняются. Весь пакет применяется атомарно.",
+        "required": [
+          "expectedVersion",
+          "changes"
+        ],
+        "properties": {
+          "expectedVersion": {
+            "type": "integer",
+            "description": "Актуальная schedule.version из GET calendar. Строки, float и boolean не принимаются. Проверяется до определения no-op.",
+            "format": "int64",
+            "minimum": 1,
+            "example": 1
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CellChange"
+            },
+            "description": "От 1 до 2000 уникальных пар employeeId/workDate. Неуказанные ячейки не изменяются. Регистр UUID не делает повторную пару уникальной.",
+            "minItems": 1,
+            "maxItems": 2000
+          }
+        },
+        "additionalProperties": false
+      },
+      "ChangedCell": {
+        "type": "object",
+        "required": [
+          "employeeId",
+          "workDate",
+          "shift"
+        ],
+        "properties": {
+          "employeeId": {
+            "type": "string",
+            "description": "Ключ ячейки: сотрудник.",
+            "format": "uuid",
+            "example": "00000000-0000-4000-8000-000000000201"
+          },
+          "workDate": {
+            "type": "string",
+            "description": "Ключ ячейки: дата.",
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-11-09"
+          },
+          "shift": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CellShift"
+              },
+              {
+                "$ref": "#/components/schemas/ClearedShift"
+              }
+            ],
+            "description": "Итоговое содержимое ячейки после сохранения либо null после очистки."
+          }
+        },
+        "additionalProperties": false
+      },
+      "SaveCellsResponse": {
+        "type": "object",
+        "required": [
+          "version",
+          "changedCells"
+        ],
+        "properties": {
+          "version": {
+            "type": "integer",
+            "description": "Новая версия, увеличенная ровно на 1 при фактических изменениях; при no-op остаётся прежней.",
+            "format": "int64",
+            "minimum": 1,
+            "example": 2
+          },
+          "changedCells": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChangedCell"
+            },
+            "description": "Нормализованное состояние всех ячеек из запроса, включая очищенные и фактически неизменённые.",
+            "minItems": 1,
+            "maxItems": 2000
+          }
+        },
+        "additionalProperties": false
+      },
+      "PublishRequest": {
+        "type": "object",
+        "description": "Публикуется весь сохранённый диапазон, независимо от локального выделения. Неизвестные поля, включая createdBy, отклоняются.",
+        "required": [
+          "expectedVersion",
+          "from",
+          "to"
+        ],
+        "properties": {
+          "expectedVersion": {
+            "type": "integer",
+            "description": "Версия сохранённого графика, которую требуется опубликовать. Положительное JSON-целое.",
+            "format": "int64",
+            "minimum": 1,
+            "example": 1
+          },
+          "from": {
+            "type": "string",
+            "description": "Начало диапазона включительно, в локальных календарных датах графика.",
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-11-09"
+          },
+          "to": {
+            "type": "string",
+            "description": "Конец диапазона исключительно. Между from и to от 1 до 62 календарных дней.",
+            "format": "date",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-11-16"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PublicationMetadata": {
+        "type": "object",
+        "required": [
+          "id",
+          "scheduleId",
+          "range",
+          "sourceVersion",
+          "publishedAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Идентификатор публикации из ответа POST. Пример UUID не является предзаполненной публикацией.",
+            "format": "uuid",
+            "example": "00000000-0000-4000-8000-000000000401"
+          },
+          "scheduleId": {
+            "type": "string",
+            "description": "Идентификатор графика.",
+            "format": "uuid",
+            "example": "00000000-0000-4000-8000-000000000001"
+          },
+          "range": {
+            "$ref": "#/components/schemas/DateRange"
+          },
+          "sourceVersion": {
+            "type": "integer",
+            "description": "Версия сохранённого графика, из которой создан снимок.",
+            "format": "int64",
+            "minimum": 1,
+            "example": 1
+          },
+          "publishedAt": {
+            "type": "string",
+            "description": "Момент создания публикации в UTC.",
+            "format": "date-time",
+            "example": "2026-11-09T11:30:00Z"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PublicationSnapshot": {
+        "type": "object",
+        "description": "Неизменяемая структура версии 1. schedule.version равна sourceVersion; range совпадает с метаданными публикации. Список доступных шаблонов shiftTemplates в снимок не входит.",
+        "required": [
+          "schemaVersion",
+          "schedule",
+          "range",
+          "employees",
+          "shifts",
+          "coverage"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "type": "integer",
+            "description": "Версия структуры снимка.",
+            "enum": [
+              1
+            ]
+          },
+          "schedule": {
+            "$ref": "#/components/schemas/Schedule"
+          },
+          "range": {
+            "$ref": "#/components/schemas/DateRange"
+          },
+          "employees": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Employee"
+            },
+            "description": "Данные сотрудников и итоги на момент публикации."
+          },
+          "shifts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Shift"
+            },
+            "description": "Назначения из сохранённого снимка."
+          },
+          "coverage": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Coverage"
+            },
+            "description": "Покрытие всех дат опубликованного диапазона.",
+            "minItems": 1,
+            "maxItems": 62
+          }
+        },
+        "additionalProperties": false
+      },
+      "PublicationResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "scheduleId",
+          "range",
+          "sourceVersion",
+          "publishedAt",
+          "snapshot"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Идентификатор публикации из ответа POST. Пример UUID не является предзаполненной публикацией.",
+            "format": "uuid",
+            "example": "00000000-0000-4000-8000-000000000401"
+          },
+          "scheduleId": {
+            "type": "string",
+            "description": "Идентификатор графика.",
+            "format": "uuid",
+            "example": "00000000-0000-4000-8000-000000000001"
+          },
+          "range": {
+            "$ref": "#/components/schemas/DateRange"
+          },
+          "sourceVersion": {
+            "type": "integer",
+            "description": "Версия сохранённого графика, из которой создан снимок.",
+            "format": "int64",
+            "minimum": 1,
+            "example": 1
+          },
+          "publishedAt": {
+            "type": "string",
+            "description": "Момент создания публикации в UTC.",
+            "format": "date-time",
+            "example": "2026-11-09T11:30:00Z"
+          },
+          "snapshot": {
+            "$ref": "#/components/schemas/PublicationSnapshot"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "description": "Общая форма предметных ошибок графика и ограничения частоты запросов. Внутренние SQL и stack trace для маршрутов графика не выдаются.",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": [
+              "code",
+              "message",
+              "details"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Машинный код ошибки.",
+                "enum": [
+                  "INVALID_JSON",
+                  "SCHEDULE_NOT_FOUND",
+                  "PUBLICATION_NOT_FOUND",
+                  "SCHEDULE_VERSION_CONFLICT",
+                  "SHIFT_OVERLAP",
+                  "VALIDATION_FAILED",
+                  "INVALID_DATE_RANGE",
+                  "INVALID_SHIFT_TIME",
+                  "EMPLOYEE_NOT_IN_SCHEDULE",
+                  "EMPLOYEE_INACTIVE",
+                  "TEMPLATE_INACTIVE",
+                  "TEMPLATE_NOT_FOUND",
+                  "TEMPLATE_VALUES_MISMATCH",
+                  "DUPLICATE_CELL_CHANGE",
+                  "EMPTY_CHANGESET",
+                  "RATE_LIMIT_EXCEEDED",
+                  "INTERNAL_ERROR",
+                  "HTTP_ERROR"
+                ],
+                "example": "SCHEDULE_VERSION_CONFLICT"
+              },
+              "message": {
+                "type": "string",
+                "description": "Понятное человеку сообщение. Используйте code, а не текст сообщения, для программной обработки.",
+                "example": "График изменён в другой сессии. Обновите данные перед сохранением."
+              },
+              "details": {
+                "type": "object",
+                "description": "Объект дополнительных данных; может быть пустым. Для ячейки: employeeId, workDate, field; для валидации: fields (поле → массив сообщений); для конфликта: expectedVersion/currentVersion или conflictingWorkDate; для 429: retryAfter в секундах; для 500: requestId. Набор зависит от причины.",
+                "additionalProperties": true,
+                "example": {
+                  "expectedVersion": 1,
+                  "currentVersion": 2
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}
